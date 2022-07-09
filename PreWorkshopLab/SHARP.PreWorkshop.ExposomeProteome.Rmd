@@ -1,0 +1,246 @@
+---
+title: 'SHARP Multiomics Workshop: Exposome and Proteome Analysis'
+subtitle: "Pre-Workshop Lab"
+author: "David Conti"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{css, echo=FALSE}
+pre {
+  max-height: 200px;
+  overflow-: auto;
+}
+
+```
+
+```{r exposome and proteome setup, include=FALSE, echo=FALSE}
+library(knitr)
+library(reshape2)
+library(ggplot2)
+library(epiR)
+library(summarytools) # for summarizing variables
+library(tidyverse)
+library(glmnet)
+library(Biobase)
+library(gap)
+library(factoextra)
+library(gplots)
+library(MultiAssayExperiment)
+library(UpSetR)
+library(pls)
+library(corrplot)
+library(RColorBrewer)
+library(here)
+
+options(knitr.table.format = "html")
+knitr::opts_chunk$set(echo = TRUE)
+
+# folder for analysis
+work.dir <- here::here()
+setwd(work.dir)
+
+# suppress warning messages for final rendering
+old.warn <- getOption("warn")
+options(warn=-1)
+
+```
+
+## Exposome and Proteome: Overview
+When there are two or more high dimensional layers of omic data there are several ways to approach the analysis.
+
+1. "Late" Integration: Perform all pairwise associations via regression and then explore the results with post-processing and/or analyses:
+
+  + 1. Explore the results leveraging *a priori* knowledge or annotation for each layer to look for patterns of biological overlap or interest. Such analyses may be examining certain pathways or genes that can be annotated across omic data to see if there are consistent resutls.
+  
+  + 2. Perform formal pathway analysis on the pairwise results. Such pathway analyses are common in gene expression or genomic studies and look for over-representation of significant (or noteworthy) within certain pathways. Such analyses are very dependent upon accurately representing the null distribution of all pathways or genes and as a results are often very omic-specific in their implementation.
+  
+  + 3. Perform a data-driven analysis of the pairwise results to investigate relationships. Such analyses include hierarchical clustering, principal components, or network analysis.
+
+2. "Early" Integration: Perform first clustering or dimension reduction:
+
+  + 1. This can be performed on each omic layer independently and then commonalities are explored or clusters/components across omic layers are integrated.
+  
+  + 2. Append/concatenate omic layers into a single data set and perform clustering or dimension reduction across all layers simultaneously. This approach often comes with certain assumptions about the exchangeability across omic layers.
+  
+3. "Mixed" Integration: Alternative approaches that simultaneously identify clusters/components while also investigating relationship between omic layers. An example of this approach is partial least squares regression in which identifies components that maximum the variance between multiple outcome variables and numerous independent variables. 
+
+In this example, we investigate approach #1 in which all pairwise regressions are performed between two omic layers. We then explore results visually (#1.1 above) and through data-driven approaches (#1.3 above). We note that in this discussion and example, we do not have a specific and defined outcome of interest that will are ultimately interested in exploring. The link of multi-omic data to a specific outcome is what we are primarily exploring in the workshop lectures and labs.
+
+```{r Exposome and Proteome: Data Analysis setup, echo=TRUE }
+codebook <- read.table(paste0(work.dir, "/Data/codebook.txt"), sep="\t", header=T)
+
+# Covariates
+covariate.Names <- c("e3_sex_None","h_cohort", "age_sample_years","ethn_PC1","ethn_PC2","hs_dift_mealblood_imp","blood_sam4")
+
+# Exposure related
+exposure.group <- "Organochlorines" #Organochlorines" # {"Metals", "Organochlorines", "Organophosphate pesticides", "PBDE", "PFAS", "Phenols", "Phthalates", "All"}
+
+if(exposure.group=="All") { exposure.Names <- as.character(codebook$variable_name[codebook$domain=="Chemicals"]) }
+if(exposure.group!="All") { exposure.Names <- as.character(codebook$variable_name[codebook$family==exposure.group]) }
+exposure.Names <- exposure.Names[grep("madj", exposure.Names)] # select only children measures
+
+# Proteome
+proteome.Names <- c("Adiponectin","CRP","APO.A1","APO.B","APO.E","IL1beta","IL6","MCP1","Leptin","HGF","INSULIN","TNFalfa","BAFF","Cpeptide","PAI1","IL8","FGFBasic","GCSF","IL10","IL13","IL12","Eotaxin","IL17","MIP1alfa","MIP1beta","IL15","EGF","IL5","IFNgamma","IFNalfa","IL1RA","IL2","IP10","IL2R","MIG","IL4")
+
+# Analysis models to run
+univariate <- T
+
+```
+
+## Exposome and Proteome: Processing the Data
+```{r Exposome and Proteome: Processing the Data, echo=TRUE}
+load(paste0(work.dir, "/Data/HELIX.MultiAssayExperiment.RData"))
+
+variables <- c(covariate.Names, exposure.Names, proteome.Names)
+d <- wideFormat(intersectColumns(helix_ma[variables, ,])) # 1) select variables but keep in MultiAssayExperiment format; 2) intersectionColumns selects only individuals with complete data; 3) wideFormat returns as a DataFrame
+
+
+# Create  design matrix
+X <- as.data.frame(d[,paste("proteome",proteome.Names,sep="_")])
+names(X) <- proteome.Names
+X <- scale(X, center=T, scale=T)
+
+# Create exposure design matrix
+W <- as.data.frame(apply(d[,paste("exposome",exposure.Names,sep="_")],2,as.numeric))
+names(W) <- exposure.Names
+W <- scale(W, center=T, scale=T)
+
+# Create the covariate design matrix
+U <- d[,c(paste0("covariates_", covariate.Names[1:2]), paste0("metabol_urine.cov_", covariate.Names[3:7]))]
+names(U) <- covariate.Names
+U[,c("h_cohort","e3_sex_None")] <- lapply(U[,c("h_cohort","e3_sex_None")], factor)
+U[,c("age_sample_years","ethn_PC1","ethn_PC2","hs_dift_mealblood_imp","blood_sam4")] <- lapply(U[,c("age_sample_years","ethn_PC1","ethn_PC2","hs_dift_mealblood_imp","blood_sam4")], as.numeric)
+U <- model.matrix(as.formula(paste("~-1+", paste(covariate.Names, collapse="+"))), data=U) 
+
+# Other variables for analysis
+N <- nrow(d) # number of individuals in the analysis
+Q <- ncol(U)  # number of covariates in the matrix U
+P <- ncol(X)  # number of proteome features in the matrix X
+R <- ncol(W)  # number of exposome features in the matrix X
+
+```
+<br>
+
+## Exposome and Proteome: Pairwise Univariate Regression Between Exposures and Proteins
+```{r Exposome and Proteome: Univariate model, echo=TRUE}
+if(univariate) {
+  univariate.results <- {}
+  beta.results <- matrix(0, nrow=R, ncol=P)
+  p.results <- matrix(0, nrow=R, ncol=P)
+  for(r in 1:R) { # loop through exposures
+    w <- W[,r]
+    for(p in 1:P) { # loop through proteins
+      x <- X[,p]
+      reg <- glm(x~w+U, family=gaussian)
+      s.reg <- summary(reg)                 # get the summary for the regression
+      c.reg <- s.reg$coef["w",]             # select the coefficients for the exposure
+      r.reg <- c(exposure.Names[r], proteome.Names[p], c.reg)
+      write.table(t(r.reg), file="ExposomeProteomeUnivariateResults.txt", append=ifelse(p*r==1, F, T), quote=F, sep="\t", col.names=ifelse(p*r==1, T, F), row.names=F)
+      beta.results[r,p] <- as.numeric(r.reg["Estimate"])
+      p.results[r,p] <- as.numeric(r.reg["Pr(>|t|)"])
+      univariate.results <- rbind(univariate.results, r.reg)
+    }
+  }
+  univariate.results <- as.data.frame(univariate.results)
+  names(univariate.results) <- c("Exposure", "Proteome", names(univariate.results)[3:6])
+  beta.results <- as.data.frame(beta.results)
+  p.results <- as.data.frame(p.results)
+  names(beta.results) <- proteome.Names
+  names(p.results) <- proteome.Names
+  row.names(beta.results) <- exposure.Names
+  row.names(p.results) <- exposure.Names
+}
+
+beta.results.long <- melt(as.matrix(beta.results))
+names(beta.results.long) <- c("Exposure", "Protein", "Effect")
+
+beta.pca <- prcomp(beta.results, scale = TRUE)
+
+```
+
+### Exposome and Proteome: Visualization of Univariate results: {.tabset}
+#### Univariate Summary Table:
+```{r Exposome and Proteome:: Univariate table}
+if(univariate) { kable(univariate.results[univariate.results[,"Pr(>|t|)"] <0.05,], digits=3, align="c", row.names=FALSE, col.names=c("Exposure", "Protein","Estimate", "SD","t Value", "P Value"))}
+```
+
+#### Univariate Manhattan Plot:
+```{r Exposome and Proteome:: Univariate MH plot}
+
+neglog.pvalues <- -log10(as.numeric(univariate.results[,"Pr(>|t|)"]))
+plot(1:nrow(univariate.results), neglog.pvalues, 
+     pch=16, xaxt="n", ylim=c(0, max(neglog.pvalues, 3)),
+     ylab="-log(p-value)", xlab="",
+     col=match(univariate.results$Exposure, exposure.Names))
+abline(h=-log10(0.05/nrow(univariate.results)), lty=2, lwd=2, col=2)
+axis(side=1, at=(1:R)*(P)-P*.5, labels=FALSE)
+text(x=(1:R)*(P), y=par("usr")[3]-0.1, xpd=NA,
+      labels=exposure.Names, adj=1.2, srt=45, cex=.6)
+
+```
+
+#### Effects by Exposure and Protein
+```{r Exposome and Proteome: Effects by Exposure and Protein }
+
+ggplot(beta.results.long, 
+       aes(fill=Exposure, y = Effect, x = Protein)) + 
+  geom_bar(position="dodge", stat="identity") + 
+  ggtitle("Title") +
+  facet_wrap(~Protein) +
+  facet_grid(rows = vars(Exposure)) + 
+  xlab("") +
+  ylab("Effect") + 
+  theme(text = element_text(size=1),
+        axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   hjust = 1, size=7),
+        axis.text.y = element_text(size=10),
+        legend.title = element_blank(),
+        legend.text = element_text(size=10))
+
+```
+
+### Exposome and Proteome: Data-driven Analysis of Univariate results: {.tabset}
+Here, we examine the pairwise results (i.e. the effect estimates of $\beta$s from the regression of each protein on each exposure) by treating the estimates as the data and preforming hierarchical clustering and principal component analysis, as examples.
+
+#### Heatmap:
+```{r Exposome and Proteome: heatmap}
+heatmap.2(x=as.matrix(beta.results), hclustfun=function(d) hclust(d, method = "ward.D2"), trace="none", cexRow =.5, cexCol = .5)
+
+```
+
+#### PCA: Scree Plot
+```{r Exposome and Proteome: PCA Scree Plot}
+
+fviz_eig(beta.pca)
+
+
+```
+
+#### PCA: Proteins
+```{r Exposome and Proteome: PCA Protein Plot} 
+fviz_pca_var(beta.pca,
+             title="PCA by Protein Contribution",
+             col.var = "contrib", # Color by proportional amount to the PC
+             gradient.cols = c("green", "blue", "red"),
+             repel = TRUE     # Avoid text overlapping
+             )
+
+```
+
+#### PCA: Exposures
+```{r Exposome and Proteome: PCA Exposure Plot} 
+fviz_pca_ind(beta.pca,
+             title="PCA by Exposure Contribution",
+             col.ind = "cos2", # Color by total PC amount for each "individual"
+             gradient.cols = c("green", "blue", "red"),
+             repel = TRUE     # Avoid text overlapping
+             )
+
+```

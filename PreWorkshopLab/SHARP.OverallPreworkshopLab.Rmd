@@ -1,0 +1,133 @@
+---
+title: 'SHARP Multiomics Workshop: Pre-Workshop Lab'
+author: "David Conti"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    df_print: paged
+    code_folding: hide
+---
+
+```{r overall setup, include=FALSE, echo=FALSE}
+library(knitr)
+library(reshape2)
+library(ggplot2)
+library(epiR)
+library(summarytools) # for summarizing variables
+library(tidyverse)
+library(glmnet)
+library(Biobase)
+library(gap)
+library(factoextra)
+library(gplots)
+library(MultiAssayExperiment)
+library(UpSetR)
+library(pls)
+library(corrplot)
+library(RColorBrewer)
+library(mvtnorm)
+library(MASS)
+library(BAS)
+library(here)
+
+options(knitr.table.format = "html")
+knitr::opts_chunk$set(echo = TRUE)
+
+# folder for analysis
+
+work.dir <- here::here()
+#setwd(work.dir)
+
+# suppress warning messages for final rendering
+old.warn <- getOption("warn")
+options(warn=-1)
+
+```
+
+
+Welcome to the SHARP Multi-omics Workshop. The goal of this workshop is to explore statistical methods for the analysis of multi-omic (or multi-view or multi-layer) data in observational studies. From this perspective, many population based or observational studies supplement a primary goal of investigating a risk factor on an outcome with additional omic data to better characterize the risk factors (e.g. germline genetics, exposomics), provide measurements for intermediate variables (e.g. transcriptomics, proteomics, metabolomics, and the microbiome), and/or to define a specific outcome of interest such as a single or multiple biomarkers. While all omic measurements often share a ‘high-dimensional” aspect, the different omic ‘dimensions’ can vary extensively in their scale of measurement, correlation structure, and strength and proportion of associations. In this context, the investigator is often confronted with an analytic decision between simplicity and complexity. Simple approaches often treat sets of variables in a pairwise independent manner sacrificing joint evaluation for benefits in interpretability. Complex methods often model joint correlation structures, but can sacrifice ease of interpretation.
+
+Conceptually, multi-omic data can be integrated following several philosophical approaches (Picard et al. 2021):
+
+- **1. Early Integration**
+  + This concatenates every omic layer into a single large matrix with subsequent analysis methods applied to this single matrix.
+
+- **2. Mixed Integration**
+  + Transforms each omic layer into a simpler representation with subsequent analysis methods applied to these simpler or processed features.
+  
+- **3. Intermediate Integration**
+  + Any approach that jointly integrates the multiple omic layers without pre-processing each layer.
+
+- **4. Late Integration**
+  + Approaches that apply association analysis to each omic layer and features within and then "post-process" the results.
+
+Within each of these type of approaches there is often the need for reducing the number of variables for analysis for either computational efficiency or to reduce the statistical noise. Such reduction techniques generally fall into two main types of approaches.
+
+- **Dimensional reduction**
+  + Feature selection: determining a smaller set of features that keep most of the relevant information. Example includes machine learning or regularized regression.
+  + Feature extraction: transformation of the native features into a reduced set of variables that "capture" similar information. Example includes principal component analysis.
+
+Since most observational studies use association analysis as the bedrock for inference in this workshop we will build from the basic association framework and discuss extensions for integrated multi-omic analysis - always focusing on how integration strategies can by used to then investiagate the subsequent role of the omic layer or specific feature on a outcome of interest. Accordingly the workshop focuses on expanding or integrating multi-omic data into an association frameworks. For the workshop, we will discuss the following:
+
+**A. Interaction analysis**: genomewide interaction analysis that focus often on a single risk factor and how it interacts with genomewide SNP data.
+
+**B. Polygenic models and the use of genetic summary statistics data**: As another example of an extension to GWAS studies, these analysis techniques look to combine data into a single risk score (polygenic risk) or use genetic summary statistics from 1) the association of SNPs to an outcome; and 2) from the association of SNPs to a intermediate (often high dimensional omic data) to then test the association of the intermediate to the outcome. 
+
+**C. Clustering**: With omic data clustering often serves as a key analytic technique within the analysis pipeline. This includes: 1) an initial step of dimension reduction or exploration of a single omic layer or multiple omic layers for downstream association analyses; or 2) the post-processing of high dimensional results from pairwise association analyses of omic data.
+
+**D. Mediation**: To remain connected to the original biological hypothesis that often guides a study, mediation analysis strives to link the relationships between three sets of variables: 1) the risk factors; 2) the mediators or intermediates; and 3) the outcome. Omic data can be measured for each type of variable (most often on the risk factors and/or the intermediates) and high dimensional mediation techniques (including the incorproation of clustering or latent estimation) can be used for analysis. 
+
+Overall, we focus on statistical analyses for association testing with multi-omic data. We will not focus on the "lab-based" methods and techniques for measuring each type of omic data set or the omic-specific quality control or processing required and crucial for successful evaluation and use of omic data. We feel that there are ample training opportunities available that describe the details of these analyses for each type of omic data. 
+
+To facilitate the sessions and topics covered during the workshop we have created a pre-workshop lab. The idea of this pre-workshop lab is to provide a self guided tour to familiarize you with the data and basic statistical analyses that will serve as the foundation for content presented in the SHARP Multi-omics Workshop.
+
+Each section consists of a R markdown file (.Rmd) and an .html file. The html file can be opened via a web browser and provides a formatted version to go through the presented material. At each stage, code can be revealed by clicking on the "code" button. As an alternative, the .Rmd files can be opened within R Studio and each code chunk can be run to explore the analysis in detail. In addition, the .Rmd files (include this file "PreworkshopLab.Rmd" can be "knitted" to create the html file by clicking the "knit" button in Rstudio).
+
+The content in this pre-workshop will be discussed within the first session of the workshop to provide more background and context. 
+
+
+# 1. Data Description
+```{r child="SHARP.Preworkshop.Data.Rmd" }
+
+```
+
+---
+
+# 2. Primer on Regression analysis and Related Topics
+```{r child="SHARP.PreWorkshop.Regression.Rmd" }
+
+```
+
+---
+
+# 3. An Example of a Single-layer Omic Analysis for Exposome Data and a Outcome
+```{r child="SHARP.PreWorkshop.Exposome.Rmd" }
+
+```
+
+---
+
+# 4. An Example of a Single-layer Omic Analysis for Genomic Data and a Outcome
+```{r child="SHARP.PreWorkshop.Genome.Rmd" }
+
+```
+
+---
+
+# 5. An Example of a Two-layer Omic Analysis With Both Layers High-Dimensional
+```{r child="SHARP.PreWorkshop.ExposomeProteome.Rmd" }
+
+```
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,160 @@
+---
+title: 'SHARP Multiomics Workshop: Data Description'
+subtitle: "Pre-Workshop Lab"
+author: "David Conti"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{css, echo=FALSE}
+pre {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+```
+
+```{r data setup, include=FALSE, echo=FALSE}
+library(knitr)
+library(reshape2)
+library(ggplot2)
+library(epiR)
+library(summarytools) # for summarizing variables
+library(tidyverse)
+library(glmnet)
+library(Biobase)
+library(gap)
+library(factoextra)
+library(gplots)
+library(MultiAssayExperiment)
+library(UpSetR)
+library(pls)
+library(corrplot)
+library(RColorBrewer)
+
+options(knitr.table.format = "html")
+knitr::opts_chunk$set(echo = TRUE)
+
+# folder for analysis
+work.dir <- here::here()
+#setwd(work.dir)
+
+# suppress warning messages for final rendering
+old.warn <- getOption("warn")
+options(warn=-1)
+
+```
+
+## Data Overview
+This describes the data that will be used for many of the labs throughout the workshop. We also present an example on how to construct a MultiAssayExperiment object - an R object for storing multi-view or multiple omic data sets measured on the same individuals.
+
+## Exposome Data Challenge
+```{r image-exposome-data-challenge, class.output="figure", echo=FALSE, message=FALSE, fig.align='center', fig.cap='', out.width='100%', out.height='100%'}
+knitr::include_graphics(paste0(work.dir, "/ExposomeDataChallenge.png"))
+```
+
+
+The data is from the Exposome Data Analysis Challenge (https://www.isglobal.org/-/exposome-data-analysis-challenge). The Exposome dataset represents a real case scenario of an exposome dataset (based on the HELIX project database) with multiple correlated variables (N>100 exposure variables) arising from general and personal environments at different time points, biological molecular data (multi-omics: DNA methylation, gene expression, proteins, metabolomics, exposome) and multiple clinical phenotypes. The population is drawn from a multi-center study which will results in one of the main confounding structures in the dataset.
+
+In addition, for the SHARP Multiomics Workshop, we simulated a germline genetics example dataset. 
+
+## The HELIX study
+```{r image-helix, echo=FALSE, message=FALSE, fig.align='center', fig.cap='', out.width='100%', out.width='100%'}
+knitr::include_graphics(paste0(work.dir, "/HELIX.png"))
+```
+The HELIX study represents a collaborative project across six established and ongoing longitudinal population-based birth cohort studies in six European countries (France, Greece, Lithuania, Norway, Spain, and the United Kingdom). HELIX used a multilevel study design with the entire study population totaling 31,472 mother–child pairs, recruited during pregnancy, in the six existing cohorts (first level); a subcohort of 1301 mother-child pairs where biomarkers, omics signatures and child health outcomes were measured at age 6-11 years (second level); and repeat-sampling panel studies with around 150 children and 150 pregnant women aimed at collecting personal exposure data (third level). For more details on the study design see Vrijheid, Slama, et al. EHP 2014. see https://www.projecthelix.eu/index.php/es/data-inventory for more information regarding the study.
+```{r image-helix-data, echo=FALSE, message=FALSE, fig.align='center', fig.cap='', out.width='100%', out.width='100%'}
+knitr::include_graphics(paste0(work.dir, "/HELIX_Data.png"))
+```
+<br>
+
+## Data Processing and Organization {.tabset}
+```{r Data Processing and Organization, echo=TRUE}
+load(paste0(work.dir, "/Data/exposome.RData"))
+load(paste0(work.dir, "/Data/proteome.RData"))
+load(paste0(work.dir, "/Data/genome.RData"))
+load(paste0(work.dir, "/Data/metabol_serum.RData"))
+load(paste0(work.dir, "/Data/metabol_urine.RData"))
+
+outdoor.exposures <- exposome[,c("ID", as.character(codebook$variable_name[codebook$domain=="Outdoor exposures"]))] %>% 
+  column_to_rownames("ID") %>% 
+  t() %>%
+  DataFrame()
+indoor.air <- exposome[,c("ID", as.character(codebook$variable_name[codebook$domain=="Indoor air"]))] %>% 
+  column_to_rownames("ID") %>% 
+  t() %>%
+  DataFrame()
+lifestyles <- exposome[,c("ID", as.character(codebook$variable_name[codebook$domain=="Lifestyles"]))] %>% 
+  column_to_rownames("ID") %>% 
+  t() %>%
+  DataFrame()
+chemicals <- exposome[,c("ID", as.character(codebook$variable_name[codebook$domain=="Chemicals"]))] %>% 
+  column_to_rownames("ID") %>% 
+  t() %>%
+  DataFrame()
+covariates <- covariates %>% 
+  column_to_rownames("ID") %>% 
+  t() %>%
+  DataFrame()
+phenotype <- phenotype %>% as.data.frame() # use as ColData for MultiAssayExperiment format
+row.names(phenotype) <- paste0("X", phenotype$ID)
+
+proteome.d <- proteome@assayData$exprs %>% DataFrame()
+proteome.cov <- proteome@phenoData@data
+proteome.cov <- proteome.cov[stats::complete.cases(proteome.cov),] %>% t() %>% DataFrame()
+
+metabol_urine.d <- metabol_urine@assayData$exprs %>% DataFrame()
+metabol_urine.cov <- metabol_urine@phenoData@data
+metabol_urine.cov <- metabol_urine.cov[stats::complete.cases(metabol_urine.cov),] %>% t() %>% DataFrame()
+
+metabol_serum.d <- metabol_serum@assayData$exprs %>% DataFrame()
+metabol_serum.cov <- metabol_serum@phenoData@data
+metabol_serum.cov <- metabol_serum.cov[stats::complete.cases(metabol_serum.cov),] %>% t() %>% DataFrame()
+
+# note that we do not include the gene expression nor the methylation data in the MultiAssayExperiment object as they are large. We also don't recommend storing genomewide data in this format. However, we include a small (e.g. 1000 SNPs) "genome" germline genetics data as an example.
+helix_ma <- MultiAssayExperiment(
+  experiments= ExperimentList("outdoor.exposures"=outdoor.exposures,
+                              "indoor.air"=indoor.air,
+                              "lifestyles"=lifestyles,
+                              "exposome"=chemicals,
+                              "covariates"=covariates,
+                              "proteome"=proteome.d,
+                              "proteome.cov"=proteome.cov,
+                              "metabol_urine"=metabol_urine.d,
+                              "metabol_urine.cov"=metabol_urine.cov,
+                              "metabol_serum"=metabol_serum.d,
+                              "metabol_serum.cov"=metabol_serum.cov,
+                              "genome"=G), 
+  colData = phenotype)
+
+# clean up after creating MultiAssayExperiment data object
+rm(outdoor.exposures)
+rm(indoor.air)
+rm(lifestyles)
+rm(chemicals)
+rm(covariates)
+rm(proteome.d)
+rm(proteome.cov)
+rm(metabol_urine.d)
+rm(metabol_urine.cov)
+rm(metabol_serum.d)
+rm(metabol_serum.cov)
+rm(G)
+#save(paste0(work.dir, "/Data/HELIX.MultiAssayExperiment.RData")) # code to save if needed
+```
+
+### Codebook for Exposures, Covariates, and Phenotypes
+```{r codebook, attr.output='style="max-height: 100px;"',}
+kable(codebook, align="c")
+```
+
+### Available Data Across Individuals
+```{r Explore MultiAssayExperiment}
+upsetSamples(helix_ma, nintersects = 10)
+```
+

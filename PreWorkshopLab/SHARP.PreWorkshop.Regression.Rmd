@@ -1,0 +1,472 @@
+---
+title: 'SHARP Multiomics Workshop: Primer in Regression and Related Topics'
+subtitle: "Pre-Workshop Lab"
+author: "David Conti"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{css, echo=FALSE}
+pre {
+  max-height: 200px;
+  overflow-: auto;
+}
+
+```
+
+```{r regression setup, include=FALSE, echo=FALSE}
+library(knitr)
+library(reshape2)
+library(ggplot2)
+library(epiR)
+library(summarytools) # for summarizing variables
+library(tidyverse)
+library(glmnet)
+library(Biobase)
+library(gap)
+library(factoextra)
+library(gplots)
+library(MultiAssayExperiment)
+library(UpSetR)
+library(pls)
+library(corrplot)
+library(RColorBrewer)
+library(mvtnorm)
+library(MASS)
+library(BAS)
+library(here)
+
+options(knitr.table.format = "html")
+knitr::opts_chunk$set(echo = TRUE)
+
+# folder for analysis
+work.dir <- here::here()
+#setwd(work.dir)
+
+# suppress warning messages for final rendering
+old.warn <- getOption("warn")
+options(warn=-1)
+
+```
+
+## Regression Overview
+This introduces basic linear regression and some related topics (e.g. confounding, non-linear outcomes, and multiple testing). It also presents several approaches for multivariable regression when the number of omic features to be evaluated is large in comparison to the number of individuals (e.g. ridge, lasso, elastic net regression, and Bayesian selection). While useful by themselves, the statistical motivation and approaches serve as the foundation for many of the extensions that will be presented in the workshop sessions.
+
+This primer aims to present an overview and common themes across approaches. It is not comprehensive nor detailed in its coverage.
+
+Using the approaches presented in this section, there are three additional sections that apply some of these approaches in practice.
+
+```{r Regression: Data Analysis setup, echo=TRUE }
+
+# Outcome
+outcome.Name <- "hs_zbmi_who" # "hs_asthma" # "hs_bmi_c_cat" "hs_zbmi_who"
+
+# Covariates
+covariate.Names <- c("e3_sex_None","age_sample_years","ethn_PC1","ethn_PC2","hs_dift_mealblood_imp","blood_sam4")
+
+# Proteome
+proteome.Names <- c("Adiponectin","CRP","APO.A1","APO.B","APO.E","IL1beta","IL6","MCP1","Leptin","HGF","INSULIN","TNFalfa","BAFF","Cpeptide","PAI1","IL8","FGFBasic","GCSF","IL10","IL13","IL12","Eotaxin","IL17","MIP1alfa","MIP1beta","IL15","EGF","IL5","IFNgamma","IFNalfa","IL1RA","IL2","IP10","IL2R","MIG","IL4")
+
+# Analysis models to run
+univariate <- T
+run_p_act <- T  # takes a few minutes to run
+ridge <- T
+lasso <- T
+elasticnet <- T
+bayesian.selection <- T # takes a few minutes to run
+```
+
+### Processing the Data
+```{r Regression: Processing the Data, echo=TRUE}
+load(paste0(work.dir, "/Data/HELIX.MultiAssayExperiment.RData"))
+
+variables <- c(covariate.Names, proteome.Names)
+d <- wideFormat(intersectColumns(helix_ma[variables, ,]), colDataCols=outcome.Name) # 1) select variables but keep in MultiAssayExperiment format; 2) intersectionColumns selects only individuals with complete data; 3) wideFormat returns as a DataFrame
+
+# Create design matrix
+X <- as.data.frame(d[,paste("proteome",proteome.Names,sep="_")])
+names(X) <- proteome.Names
+X <- scale(X, center=T, scale=T)
+x.name <- "IL1beta" # specific protein for univariate example
+
+# Create the outcome variable
+Y <- d[,outcome.Name] # outcome
+if(outcome.Name=="hs_bmi_c_cat") { Y <- ifelse(as.numeric(Y)>=3, 1, 0)}
+if(outcome.Name=="e3_bw") { Y <- ifelse(as.numeric(Y)<2500, 1, 0)}
+
+# Create the covariate design matrix
+U <- as.data.frame(d[,c(paste("covariates",covariate.Names[1],sep="_"), paste("proteome.cov",covariate.Names[2:length(covariate.Names)],sep="_"))])
+names(U) <- covariate.Names
+U[,c("e3_sex_None")] <- as.factor(U[,c("e3_sex_None")])
+U[,c("age_sample_years","ethn_PC1","ethn_PC2","hs_dift_mealblood_imp","blood_sam4")] <- lapply(U[,c("age_sample_years","ethn_PC1","ethn_PC2","hs_dift_mealblood_imp","blood_sam4")], as.numeric)
+U <- model.matrix(as.formula(paste("~-1+", paste(covariate.Names, collapse="+"))), data=U) 
+
+# Other variables for analysis
+N <- nrow(d) # number of individuals in the analysis
+Q <- ncol(U)  # number of covariates in the matrix U
+P <- ncol(X)  # number of variables in the matrix X
+
+```
+<br>
+
+## Regression Analysis for a Single Feature
+### Question of interest
+Is there a relationship between `r x.name` (X) and `r outcome.Name` (Y)?
+```{r linear regression plot, echo=TRUE}
+x <- X[,x.name]
+plot(x, Y, pch=16, xlab=x.name, ylab=outcome.Name, main="Scatterplot for X and Y")
+
+```
+
+### Build a regression model
+The mean of Y is a straight line that is a function of X: $$\mu_{Y|X} = \alpha + \beta X$$ or equivalently describing the relationship of each individual point, $$Y_i = \alpha + \beta X + \epsilon_i$$ where $\epsilon_i$ is the error or residual and is assumed to be a random variable with a mean of zero and variance of $sigma^2$, or $\epsilon_i \sim N(0, \sigma^2)$. That is, across all individuals the mean of all the $\epsilon_i$s will be zero. For linear regression the model can be estimated by minimization of the square of all the errors (i.e. least squares), or via maximum likelihood estimation.
+
+
+There are five assumptions for the valid implementation and interpretation of linear regression. These are:
+
+1. Existence: for any fixed value of X, Y is a random variable with population mean $\mu_{Y|X}$ and population variance $\sigma^2_{Y|X}$.
+
+2. Independence: Conditional on X, the Y-values are statistically independent of one another. This assumption is usually satisfied when there is one measurement per person. As example, this can be violated with multiple measures on a person over time (i.e. longitudinal measures) or as single measures within individuals from a family (i.e. familial clustering).
+
+3. Linearity: the mean of Y is a straight line function of X. That is, for all 1 unit increase in X across all values of X, Y will increase at the same rate.
+
+4. Homoscedasticity: For any fixed value of X, the variance of Y is a constant i.e. $\sigma^2_{Y|X} = \sigma^2$.
+
+5. Normality: For any fixed value of X, Y has a normal distribution. Normality is required for validity in hypothesis testing and construction of confidence intervals. However, with a large N, the central limit theorem makes inferences ‘robust’ to deviations from this assumption.
+
+An alternative representation of a linear regression model is to write it as a normal distribution that more explicitly represents many of these assumptions: $$Y_i \sim N(\mu_{Y|X}, \bf{I}\sigma^2)$$.  
+```{r linear regression example, echo=TRUE}
+reg <- lm(Y~x) # linear regression
+s.reg <- summary(reg)
+plot(x, Y, pch=16, xlab=x.name, ylab=outcome.Name, main="Scatterplot for X and Y")
+abline(reg, lwd=2)
+
+slope <- s.reg$coef["x", "Estimate"]
+se.slope <- s.reg$coef["x", "Std. Error"]
+R_squared <- s.reg$r.squared
+```
+
+### Parameters of interest
+**Slope**: the estimated change in the mean of Y per a one unit increase in X. This is captured by the parameter $\beta$ in the above regression model. For the above example, $\hat{\beta}$ = `r round(slope,2)`. Thus, the mean of `r outcome.Name` changes `r round(slope,2)` units as `r x.name` changes one unit.
+
+$\bf{R^2}$: the amount of variation in Y explained by the regression model, i.e. how much variation does `r x.name` explain in the `r outcome.Name`. $R^2$ is calculated using:
+
+1. The sum of the squared deviations of each sample point $Y_i$ around the sample mean, $\bar{Y}$: $$SSY = \sum_{i=1}^{N}(Y_i - \bar{Y})^2$$ This is the amount of variation in Y around the mean of Y or without any information from the Xs.
+
+2. The sum of the squared deviations of each sample point $Y_i$ from the estimated regression line: $$SSE = \sum_{i=1}^{N}(Y_i - \hat{Y}_i)^2 = \sum_{i=1}^{N}\epsilon_i^2$$ and where $\hat{Y}_i = \hat{\alpha} + \hat{\beta} X_i$. This represents the amount of variation in Y that remains after explaining Y by a linear dependence on X.
+
+3. SSY-SSE: this is the quantity that represents the amount of variation explained by the regression of Y on X. The total possible amount of variation (SSY) after subtracting the amount that can not be explained or the residual variation (SSE): $$SSY - SSE = \sum_{i=1}^{N}(\hat{Y}_i - \bar{Y})^2$$
+
+Finally, $R^2$ is calculated as" $$R^2 = (SSY-SSE)/SSY$$ and can be interpreted as the percent of total variation in Y (SSY) that is explained by the regression model for Y on X (SSY-SSE). Larger $R^2$ indicates a better overall fitting model with $0 \leq R^2 \leq 1$.
+
+### Testing
+We will primarily be focused on the testing of the slope. The hypothesis of interest is $H_0 = \beta=0$, i.e. no association between X and Y. To accomplish this we use a Wald test with the test statistics $$T = \frac{\hat{\beta}}{se(\hat{\beta})}$$ This test statistic has a t-distribution with N-2 df and where $se(\hat{\beta}$ is the standard error of the estimated slope. Rejecting $H_0$ implies the existence of a linear relationship or association between X and Y.
+
+We will reject $H_0$ if $|T| \gt T_{df, \alpha}$.
+
+We don't reject $H_0$ if $|T| \leq T_{df, \alpha/2}$, 
+
+where $T_{df, \alpha/2}$ is the critical value for a specific df and pre-determined $\alpha$-level for a two-sided test. We can calculate a p-value as $$P = Pr(T \gt T_{df, \alpha/2})$$
+
+Note that the p-value:
+
+1. Is not the probability that the null hypothesis is true - 
+classical frequentist approaches cannot attach probabilities to hypotheses. 
+
+2. The p-value does not indicate the size or importance of the observed effect.
+
+3. The p-value also does not indicate that the assumptions are valid or not valid.
+
+Also, it is important to understand that the Type-I error (the $\alpha$-level) of the test is not determined by the p-value. This should be determined before looking at the data.
+
+### A note about confounders
+As we are primarily interested in obtaining a valid estimate of association from a observational or epidemiologic study we need to be aware of the potential issue of confounders. We will not cover this topic in detail. In general and relative to regression modeling, a confounder variable $C$ has the property that when we adjust for $C$, using a model of the form $$Y = \alpha + \beta X + \gamma C$$ (an adjusted model), the estimate of $\beta$ is ‘different’ than the estimate of $\beta$ we get from the simpler model $$Y = \alpha + \beta X$$ (unadjusted model). By this definition the criterion for determining a confounder is vague. What do we mean by 'different'? Thus, rather than use statistical criteria to decide the inclusion of a specific confounder (e.g. corresponding Wald tests for $C$, partial correlation for $C$, or a change in $\beta$), we recommend deciding counfounders to include based on known or suspected *a priori* knowledge that $C$ is possibly related to Y and possibly related to X. these variables should be included in the model.   
+```{r adjusted linear regression model}
+reg <- lm(Y~x + U) # linear regression
+s.reg <- summary(reg)
+
+slope <- s.reg$coef["x", "Estimate"]
+se.slope <- s.reg$coef["x", "Std. Error"]
+R_squared <- s.reg$r.squared
+```
+Note that are primary interest is still the investigation of `r x.name` and `r outcome.Name` and we want to obtain the best estimate of this effect, i.e. after adjustment by confounders. This effect of interest is still the parameter $\beta$ in the adjusted regression model. For the above example, $\hat{\beta}$ = `r round(slope,2)`. Thus, the mean of `r outcome.Name` changes `r round(slope,2)` units as `r x.name` changes one unit. Note that this estimate is different than that presented above for the unadjusted model.
+
+
+### A note about generalized linear models
+Using generalized linear regression (glm) models, we assume that the outcome, $Y$, is generated from a specific distribution of the exponential family and that the mean $\mu$ of this distribution is a function of $X$. Specifically, $$E[Y|X] = \mu = g^{-1}(f(X))$$ where $g(.)$ is a link function connecting the outcome Y to the function of X. Common link functions include the identify link for the normal distribution resulting in linear regression and a logit link for a binomial distribution resulting in logistic regression. 
+```{r adjusted glm model}
+reg <- glm(Y~x + U, family=gaussian(link="identity")) # linear regression using glm
+s.reg <- summary(reg)
+
+slope <- s.reg$coef["x", "Estimate"]
+se.slope <- s.reg$coef["x", "Std. Error"]
+# note that this calculation of a "R-squared" is complicated for generalized linear models that do not used the identity link (i.e. not a linear regression model).
+
+```
+
+
+## Regression Analysis for Multiple (Correlated) Features
+With omic data we often have numerous omic measurements or features and we are interested in investigating the relationship of each one with an outcome of interest. For example, we may be interested in all proteins and 'r outcome.Name'. Specifically, we are interested in identifying which features/proteins are noteworthy in their association to the outcome and, in addition, how they combine to explain or predict the outcome. Importantly, the omic features can be highly correlated and this will impact modeling and interpretation.
+
+### Correlation Matrix for the Features:
+```{r Proteome: cor.plot, echo=TRUE}
+cormat <- cor(X, use="complete.obs")
+corrplot(cormat, type="upper", order="hclust",
+         col=brewer.pal(n=8, name="RdYlBu"),
+         title = "",
+         #addCoef.col = "black",
+         tl.cex=.5, number.cex=.5)
+
+```
+
+### Independent, Univariate Analyses
+We first can investigate the independent association of each of the $P$ factors on the outcome. Thus for $p = {1,...,P}$ we fit the following models:
+$$Y_i = \alpha_p + \beta_p X_p + \sum_Q{\gamma_{qp}U_q} + \epsilon_i$$ where $\bf{U}$ is a matrix with $Q$ covariates/confounders.
+```{r Regression: Univariate model, echo=TRUE}
+if(univariate) { 
+univariate.results <- t(sapply(1:P, FUN=function(p) {  # using index p facilitate write
+  x <- X[,p]
+  reg <- glm(Y~x+U, family=gaussian)    # perform logistic regression
+  s.reg <- summary(reg)                 # get the summary for the regression
+  c.reg <- s.reg$coef["x",]             # select the coefficients for the exposure
+  return(c.reg)                         # to avoid potential memory issues only return coefficients if small number of exposures
+}, simplify=T))
+univariate.results <- data.frame(proteome.Names,univariate.results)
+names(univariate.results) <- c("Protein","Estimate", "SD","Z.Statistic", "P-value")
+univariate.results$`P-value` <-  format(univariate.results$`P-value`, scientific=T)
+}
+```
+
+#### Univariate results: {.tabset}
+##### Univariate Summary Table:
+```{r Regression: Univariate table}
+if(univariate) { kable(univariate.results, digits=3, align="c", row.names=FALSE, col.names=c("Protein","Estimate", "SD","Z Statistic", "P-value"))}
+```
+
+##### Univariate Manhattan Plot:
+```{r Regression: Univariate plot}
+if(univariate) { 
+neglog.pvalues <- -log10(as.numeric(univariate.results$`P-value`))
+plot(1:nrow(univariate.results), neglog.pvalues, 
+     pch=16, xaxt="n", ylim=c(0, max(neglog.pvalues, 3)),
+     ylab="-log(p-value)", xlab="")
+text(x=1:nrow(univariate.results), y=par("usr")[3]-0.1, xpd=NA,
+     labels=univariate.results$proteome.Names, adj=.9, srt=45, cex=.75)
+abline(h=-log10(0.05/nrow(univariate.results)), lty=2, lwd=2, col=2)
+}
+```
+<br>
+
+### Adjustment for Multiple Comparisons: {.tabset}
+Since omic data is often high dimensional we need to adjust for multiple comparisons when determining statistical significance. There are several approaches to adjusting for multiple comparisons:
+
+1. **Bonferroni corrections**: determine significance with $p-value \lt \alpha/N$. As a familywise error rate procedure (FWER), this ensures that the overall probability of declaring significance is maintained. However, this can be conservative with non-independent tests as happens with correlated features.
+
+2. **False Discovery Rate (FDR)**: there are several procedures that are designed to control the false discovery rate (FDR) when making multiple comparisons. These generally estimate the expected proportion of false positives to the total number of features declared positive.
+
+3. **Bayesian False Discovery Probability (BFDP)**: Both Bonferroni corrections and FDR approaches treat every test as having an equal prior probability of success or rejection. The BFDp offers an alternative that models the probabiltyof a hypothesis in a Bayesian framework. This approach models the probability of the data averaged over both the null and alternative hypotheses:
+$$Pr(H_0|Data) = \frac{Pr(Data|H_0)\pi_0}{Pr(Data|H_0)\pi_0 + Pr(Data|H_1)(1-\pi_1)}$$ 
+where $\pi_0 = Pr(H_0)$. 
+
+The probability of the alternative hypothesis is a function of the effect estimate:
+$$Pr(Data|H_1) = \int{Pr(Data|\beta)Prior(\beta)d\beta}$$
+and final inference can be made based on Bayes factors: $BF = \frac{Pr(Data|H_1)}{Pr(Data|H_0)}$, a quantity comparing the evidence for the alternative vs. the null hypothesis. In the context of omic data, this approach allows the investigator to specify different values for the probability of the null hypothesis, $\pi_0$, providing a flexible framework to up- or down-weight features based on $a priori$ information that might be provided via annotation, for example.
+
+4. **P-value adjustment for correlated tests ($P_act$)**: this approach models the distribution of the resulting test statistics from a asymptotically distributed multivariate normal distribution with a known covariance matrix. That is,
+$$\bf{T} \sim MVN(0, \Sigma)$$
+where $\Sigma$ can be estimated from the covariance of the omic data design matrix, $\bf{X}$, and resulting p-values are
+$$P_p = 2[1-\bf{\Phi}(|T_p|)]$$.
+```{r P-act, echo=TRUE}
+if(run_p_act){
+  source(paste0(work.dir, "/p.act.R"))
+  pvalues <- as.numeric(univariate.results$`P-value`) # get p-values
+  system.time(p.act <- P.act(IDs=proteome.Names, Ps=pvalues, X=X, y=Y, W=U)) #
+}
+```
+
+#### Comparison of Original P-Values to $P_act$:
+```{r p_act comparison plot, echo=TRUE}
+if(run_p_act){
+  plot(pvalues, p.act, pch=16, xlab="Original P-Value", ylab="P-Act P-Value")
+  abline(v=0.05, col="red", lwd=2, lty=2)
+  abline(h=0.05, col="red", lwd=2, lty=2)
+}
+```
+
+#### Univariate Manhattan Plot for $P_act$ P-Values:
+```{r Regression: P_act Univariate plot}
+if(run_p_act){
+  neglog.pvalues <- -log10(ifelse(p.act==0, min(p.act[p.act!=0])*0.1, p.act))
+  plot(1:length(p.act), neglog.pvalues, 
+     pch=16, xaxt="n", ylim=c(0, max(neglog.pvalues, 3)),
+     ylab="-log(p-value)", xlab="",
+     col=ifelse(p.act==0, "red", "black"))
+  text(x=1:length(p.act), y=par("usr")[3]-0.1, xpd=NA,
+     labels=proteome.Names, adj=.9, srt=45, cex=.75)
+  abline(h=-log10(0.05/length(p.act)), lty=2, lwd=2, col=2)
+}
+```
+
+### Multivariable Analyses: All Features in a Single Regression Model
+Rather than treat each of the $P$ factors as independent we can model all factors within a single regression model:
+$$Y_i = \alpha_p + \sum_P{\beta_{p}X_{p}} + \sum_Q{\gamma_{qp}U_q} + \epsilon_i$$
+As before, $\bf{U}$ is a matrix with $Q$ covariates/confounders. In addition, $\bf{X}$ is a design matrix with all $P$ features included in the model. Such a specification models combinations of multiple $X$'s in a additive fashion. In $glm$ models these additive combinations are defined on the scale of the outcome as transformed by the link function. However, extending a regression model to include all $P$ factors can come with complications that occur as the number of features $P \rightarrow N$.  Mainly, the conventional estimates of effect $\hat{\beta}$ are unstable and can suffer from small data bias, i.e. estimates go towards $\infty$. For situations in which $P \geq N$, regression models cannot be fit.
+
+#### Feature Selection via *a priori* knowledge or statistical significance of each term
+One option is to perform model selection by limiting which features to include in the model. This can be done by leveraging *a priori* knowledge such as annotation etc. to preferentially select a subset of the features for inclusion. However, we often do not have a solid biological reason to include or exclude an of the measured omic features. An alternative is to use the statistical significance of each term in the regression model and decide based on a predetermined p-value cutoff on if to keep or remove a variable form a model. Such procedures most often begin with the most significant univariate model and then proceed by adding and deleting terms as they build the model in a stepwise fashion.
+
+#### Bayesian hierachical modeling
+Another approach to fitting the full multivariable model is to stabilize the estimates (or to fit them when $P \rightarrow N$) by including a second-stage model for the $\beta$s. This is a general approach referred to as hierarchical modeling. From a Bayesian perspective this is accomplished by modeling the $\beta$s as a single normal prior with a joint variance: 
+$$\beta_{p} \sim N(0, \tau^2)$$
+This approach is referred to as ridge regression. Resulting posterior estimates $\tilde{\beta}$ are a weighted average between the MLE $\hat{\beta}$ obtained and the prior (can be pre-specified) mean, $\mu_{\beta}$:
+$$\tilde{\beta}=(1-W)\mu_{\beta} + W\hat{\beta}$$
+
+Here, the weight is a balance between the estimated uncertainty for the MLE $V_{\hat{\beta}}$, which reflects the information contained by the data, and the estimated common prior variance, $\tau^{2}$: $W=\tau^{2}/(\tau^{2}+V_{\hat{\beta}})$. Thus, if the uncertainty in the MLE is large relative to estimated group variance, then the posterior estimate is shrunk towards $\mu_{\beta}$. As precision increases, the posterior estimate will be weighted more towards the MLE estimates. If $\mu_{\beta}=0$, then the posterior estimate simplifies to
+$$\tilde{\beta}= \frac{\tau^{2}}{(\tau^{2}+V_{\hat{\beta}})}\hat{\beta}$$
+Estimation of $\tau^{2}$ can be accomplished in a fully Bayesian approach, a empirical Bayes approach or a semi-Bayes approach with a pre-specified value of $\tau^{2}$.
+
+#### Ridge regression
+From a regularized regression perspective, an analogous approach can be written as the minimization of the usually least squared error plus an additional term or lose that penalizes larger estimates proportionally more. This is written as an objective function as: $$\text{min}_{\beta}\{\frac{1}{N}\left\Vert Y - \bf{X\beta}\right\Vert_2^2 + \lambda \left\Vert \beta \right\Vert_2^2 \}$$ Note that $\left\Vert \beta \right\Vert_r = (\sum_{p=1}^{P}|\beta_p|^r)^{1/r}$. In this context (i.e. ridge regression), $\lambda$ serves as the shrinkage parameter and yields:
+
+$$\tilde{\beta}= \frac{1}{(1+N\lambda)}\hat{\beta}$$
+
+In this case, all regression coefficients are shrunk by a uniform factor $\frac{1}{(1+N\lambda)}$. Estimation of $\lambda$ is usually determined via cross validation by examining the predictive ability of the overall regression model (i.e. the $R^2$) over a range of $\lambda$s investigated. Thus, the selection of $\lambda$ depends on the overall performance of the model and not on any single feature or its statistical significance. Cross validation heuristically involves repeating the process of specifying a value for $\lambda$ from the range of potential $\lambda$s, fitting the model in a subset of individuals to obtain estimates for $\beta$ via the objective function, and then testing the estimated model in the remaining individuals.
+
+```{r Regression: Ridge Regression, echo=TRUE}
+ridge.cv <- cv.glmnet(x=X, y=Y, family="gaussian", alpha=0)  # alpha=0 is for ridge
+ridge.coef <- coef(ridge.cv, s = "lambda.1se") # alternative is "lambda.min"
+ridge.fit <- glmnet(x=X, y=Y, family="gaussian", alpha=0)
+
+```
+
+##### Ridge Results: {.tabset}
+###### Ridge Selection of $\lambda$ via Cross Validation
+```{r Regression: Ridge Cross Validation}
+if(ridge) { plot(ridge.cv) }
+```
+
+###### Ridge Coefficient Shrinkage
+```{r Regression: Ridge Shrinkage}
+if(ridge) { 
+  plot(ridge.fit, xvar="lambda", label=T)
+  abline(v=log(ridge.cv$lambda.min), lty=2, col="red")
+  abline(v=log(ridge.cv$lambda.1se), lty=2, col="green")
+}
+```
+
+###### Ridge Coefficients for the Selected Model
+```{r Regression: Ridge coefficients}
+if(ridge) { ridge.coef }
+```
+
+#### Lasso regression
+Ridge regression shrinks the estimates of effect towards 0 but it does not perform feature selection. So rather than just stabilize the estimates we also want to force some of those estimates to exactly zero and thus, exclude them from the model. Similar to our previous discussion motivating  ridge regression, we can view this in a Bayesian hierarchical modeling perspective as placing a double exponential or Laplace prior distribution on the $\beta$s:
+$$\beta \sim dexp(\lambda)$$
+For a fully Bayesian implementation, the impact of a double exponential prior places a more extreme prior distribution that causes more extreme shrinkage as $\beta \rightarrow 0$, but it does not yield posterior estimates that are exactly zero. In contrast, if we frame the lasso approach in a regularized regression framework the objective function is:
+$$\text{min}_{\beta}\{\frac{1}{N}\left\Vert Y - \bf{X\beta}\right\Vert_2^2 + \lambda \left\Vert \beta \right\Vert_1 \}$$
+Whereas ridge regression shrunk the $\beta$s by a constant factor, lasso shrinks the coefficients towards zero but sets them equal to zero if they reach a constant value. Setting certain coefficients to zero is akin to excluding it from the model. Estimation of $\lambda$ is done in a similar fashion as in ridge regression often using cross validation.
+```{r Regression: Lasso Regression, echo=TRUE}
+lasso.cv <- cv.glmnet(x=X, y=Y, family="gaussian", alpha=1)  # alpha=1 is for lasso
+lasso.coef <- coef(lasso.cv, s = "lambda.1se")
+lasso.fit <- glmnet(x=X, y=Y, family="gaussian", alpha=1)
+
+```
+
+##### Lasso Results: {.tabset}
+###### Lasso Selection of $\lambda$ via Cross Validation
+```{r Regression: Lasso Cross Validation}
+if(lasso) { plot(lasso.cv) }
+```
+
+###### Lasso Coefficient Shrinkage
+```{r Regression: Lasso Shrinkage}
+if(lasso) { 
+  plot(lasso.fit, xvar="lambda", label=T)
+  abline(v=log(lasso.cv$lambda.min), lty=2, col="red")
+  abline(v=log(lasso.cv$lambda.1se), lty=2, col="green")
+}
+```
+
+###### Lasso Coefficients for the Selected Model
+```{r Regression: Lasso coefficients}
+if(lasso) { lasso.coef }
+```
+
+#### Elastic net regression
+In the presence of correlated features, ridge regression tends to shrink the coefficients of correlated features toward each other. In the extreme situation if all $P$ features are perfectly correlated, then each  will end up with identical coefficients equal to $1/P$ of the effect that would be estimated by modeling each independently or univariately. In contrast, lasso will tend to pick one of the correlated features and then shrink the rest to zero. Ideally, for correlated features, we would like to leverage both of these properties - sharing information among the correlated features but still selecting a few of the features for selection. This is achieved by weighting the penalties of the ridge and lasso objective functions. This is the approach of elastic net:
+$$\text{min}_{\beta}\{\frac{1}{N}\left\Vert Y - \bf{X\beta}\right\Vert_2^2 + \lambda [ (1-\alpha)\frac{1}{2}\left\Vert \beta \right\Vert_2^2 + \alpha\left\Vert \beta \right\Vert_1 ] \}$$
+In practice, $\alpha$ is often pre-specified (usually $\alpha=0.5$) and $\lambda$ is estimated via cross validation. Although it is possible to also estimate $\alpha$ as part of the cross-validation estimation.
+ 
+```{r Regression: Elastic net Regression, echo=TRUE}
+if(elasticnet) {
+  elasticnet.cv <- cv.glmnet(x=X, y=Y, family="gaussian", alpha=0.5)  # alpha=0.5 for elastic net with equal weight
+  elasticnet.coef <- coef(elasticnet.cv, s = "lambda.1se")
+  elasticnet.fit <- glmnet(x=X, y=Y, family="gaussian", alpha=0.5)
+}
+```
+
+##### Elastic net Results: {.tabset}
+###### Elastic net Selection of $\lambda$ via Cross Validation
+```{r Regression: Elastic net Cross Validation}
+if(elasticnet) { plot(elasticnet.cv) }
+```
+
+###### Elastic net Coefficient Shrinkage
+```{r Regression: Elastic net Shrinkage}
+if(elasticnet) { 
+  plot(elasticnet.fit, xvar="lambda", label=T)
+  abline(v=log(elasticnet.cv$lambda.min), lty=2, col="red")
+  abline(v=log(elasticnet.cv$lambda.1se), lty=2, col="green")
+}
+```
+
+###### Elastic net Coefficients for the Selected Model
+```{r Regression: Elastic net coefficients}
+if(elasticnet) { elasticnet.coef }
+```
+
+#### Bayesian stochastic feature selection
+Returning to our Bayesian hierarchical model we can implement a feature selection approach by introducing a variable $\gamma_{p}=\{0, 1\}$ for each feature that indicates if the corresponding feature is included in the model or excluded:
+$$Y_i = \alpha_p + \sum_P{\gamma_{p}\beta_{p}X_{p}} + \sum_Q{\gamma_{qp}U_q} + \epsilon_i$$
+This is similar in spirit to the Bayesian false positive report probability but instead of modeling the two hypotheses, this models the coefficient distribution directly. The prior typically chosen on the $\gamma$s is a Beta-Binomial that is often a function of the number of features $P$. This approach can also be seen as a mixture prior with a point mass at zero and a normal distribution:
+$$\beta_p =  (1-\gamma_p)\bf{0} + \gamma_p N(0, \tau^2)$$
+
+
+For correlated data we can substitute the prior normal model specification with modified priors. For linear models, Zellner's g-prior offers many advantages over alternative prior distributions for the $\beta$s, including computational and statistical considerations. The conventional $g$-prior is a conjugate Gaussian prior distribution
+$$\beta \sim N_{P}(0, g\sigma_{Y}^{2}(\boldsymbol{X}'\boldsymbol{X})^{-1})$$
+with a prior covariance specified as the scaled version of the covariance matrix of the maximum likelihood estimator and a function of the variance of the outcome, $\sigma_{Y}^{2}$. Importantly, in the linear situation, the scalar $g$ controls both the shrinkage towards the prior mean of zero and the dispersion of the posterior covariance via a shrinkage factor of $g/(1+g)$. Thus, the posterior estimate is simply
+$$\tilde{\beta}=[g/(1+g)]\hat{\beta}$$
+The g-prior specification of the prior variance includes $(\boldsymbol{X}'\boldsymbol{X})^{-1}$ which effectively down-weights models with highly correlated variables.
+
+```{r Regression: bayesian selection}
+if(bayesian.selection) { 
+  U <- U[,2:ncol(U)]
+  reg.bas <- bas.lm(Y~X+U,
+                   prior = "BIC", modelprior=beta.binomial(1,P),
+                   include.always = ~U)
+  coef.bas <- coef(reg.bas, estimator="BMA")
+  coef.r <- data.frame(c("Intercept", proteome.Names, covariate.Names), coef.bas$postmean, coef.bas$postsd,coef.bas$probne0)
+  names(coef.r) <- c("Variable", "Estimate", "Standard Deviation", "Pr(B!=0")
+}
+```
+##### Bayesian stochastic feature selection Results: {.tabset}
+###### Posterior Probability of Inclusion
+```{r Regression: bayesian selection plot posterior inclusion probabilities}
+if(bayesian.selection) { 
+  plot(reg.bas, which=c(4))
+}
+```
+
+###### Marginal Posterior Estimates
+```{r Regression: bayesian selection marginal posterior estimates}
+if(bayesian.selection) { 
+  kable(coef.r, digits=3, align="c", row.names=FALSE)
+}
+```
+

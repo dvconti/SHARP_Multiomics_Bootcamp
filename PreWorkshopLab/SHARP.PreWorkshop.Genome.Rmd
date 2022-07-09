@@ -1,0 +1,180 @@
+---
+title: 'SHARP Multiomics Workshop: Genome Analysis'
+subtitle: "Pre-Workshop Lab"
+author: "David Conti"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{css, echo=FALSE}
+pre {
+  max-height: 200px;
+  overflow-: auto;
+}
+
+```
+
+```{r genome setup, include=FALSE, echo=FALSE}
+library(knitr)
+library(reshape2)
+library(ggplot2)
+library(epiR)
+library(summarytools) # for summarizing variables
+library(tidyverse)
+library(glmnet)
+library(Biobase)
+library(gap)
+library(factoextra)
+library(gplots)
+library(MultiAssayExperiment)
+library(UpSetR)
+library(pls)
+library(corrplot)
+library(RColorBrewer)
+library(here)
+
+options(knitr.table.format = "html")
+knitr::opts_chunk$set(echo = TRUE)
+
+# folder for analysis
+work.dir <- here::here()
+
+# suppress warning messages for final rendering
+old.warn <- getOption("warn")
+options(warn=-1)
+
+```
+
+## Genome Overview
+Genomewide association studies have been extremely successful in identifying single nucleotide polymorphisms (SNPs) associated with traits and disease outcomes. By far, the single most prominent analysis technique for GWAS is to treat each SNP as independent and perform a genomewide scan with numerous univariate regression models. This brief tutorial performs this analysis and some summary results on a subset of SNPs simulated to accompanying the ISGlobal Exposome Data Challege dataset.
+
+This is not a comprehensive example of a GWAS analysis and is designed to provide insight into the genomic data and provides a foundation for further analyses. Current techniques leveraging germline genetics include GxE analyses, polygenic risk scores, and the use of summary statistics for Mendelian randomization studies and TWAS (and related) studies that often leverage additional omic data.
+
+```{r Genome: Data Analysis setup, echo=TRUE }
+
+# Outcome
+outcome.Name <- "hs_bmi_c_cat" # "hs_asthma" # "hs_bmi_c_cat" "hs_zbmi_who"
+
+# Covariates
+covariate.Names <- c("h_mbmi_None","e3_sex_None","h_age_None","h_cohort","h_edumc_None","ethn_PC1","ethn_PC2") 
+
+# SNPs
+snp.Names <- paste("SNP", 1:1000, sep=".")
+
+# Analysis models to run
+univariate <- T
+
+
+```
+
+## Genome: Processing the Data
+```{r Genome: Processing the Data, echo=TRUE}
+load(paste0(work.dir, "/Data/HELIX.MultiAssayExperiment.RData")) # not recommended way of storing genomewide data
+
+variables <- c(covariate.Names, "h_ethnicity_cauc", snp.Names)
+d <- wideFormat(intersectColumns(helix_ma[variables, ,]), colDataCols=outcome.Name) # 1) select variables but keep in MultiAssayExperiment format; 2) intersectionColumns selects only individuals with complete data; 3) wideFormat returns as a DataFrame
+
+# Create  design matrix
+X <- d[,paste0("genome_", snp.Names)]
+names(X) <- snp.Names
+X <- as.matrix(X)
+
+# Create the outcome variable
+Y <- d[,outcome.Name] # outcome
+if(outcome.Name=="hs_bmi_c_cat") { Y <- ifelse(as.numeric(Y)>=3, 1, 0)}
+
+# Create the covariate design matrix
+U <- d[,c(paste0("covariates_", covariate.Names[1:5]), paste0("proteome.cov_", covariate.Names[6:7]))]
+names(U) <- covariate.Names
+U[,c("h_cohort","e3_sex_None","h_edumc_None")] <- lapply(U[,c("h_cohort","e3_sex_None","h_edumc_None")], factor)
+U[,c("h_mbmi_None", "h_age_None","ethn_PC1","ethn_PC2")] <- lapply(U[,c("h_mbmi_None", "h_age_None","ethn_PC1","ethn_PC2")], as.numeric)
+U <- model.matrix(as.formula(paste("~-1+", paste(covariate.Names, collapse="+"))), data=U) 
+
+
+# Other variables for analysis
+N <- nrow(d) # number of individuals in the analysis
+Q <- ncol(U)  # number of covariates in the matrix U
+P <- ncol(X)  # number of SNPs in the matrix X
+
+```
+<br>
+
+## Genome: Descriptive Statistics {.tabset}  
+- The genome includes a total of `r P` single nucleotide polymorphisms (SNPs):  
+
+### Plot of Genetic Ancestry as Estimated by Prinicpal Components
+```{r Genome: PC plot, echo=TRUE}
+plot(d$proteome.cov_ethn_PC1, d$proteome.cov_ethn_PC2, pch=16, col=ifelse(d$proteome.cov_h_ethnicity_cauc=="yes", 1, 2),
+     xlab="Component 1", ylab="Component 2")
+legend(x="topleft", legend=c("Caucasian", "Other"), col=c(1,2), pch=16)
+
+```
+
+### Correlation Matrix for Local Region of the Genome:
+```{r Genome: cor.plot, echo=TRUE}
+cormat <- round(cor(X[,1:(P/5)], use="complete.obs"), 2)
+cormat[lower.tri(cormat)]<- NA
+melted_cormat <- melt(cormat)
+ggplot(data = melted_cormat, aes(Var2, Var1, fill = value))+
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal()+
+  theme(axis.text.x = element_blank(), axis.text.y = element_blank())+
+  labs(y= "SNPs", x = "SNPs")+
+  coord_fixed()
+
+```
+<br>
+
+## Genome: Univariate Regression
+```{r Genome: Univariate model, echo=TRUE}
+if(univariate) {
+  univariate.results <- t(sapply(1:P, FUN=function(p) {  # using index p facilitate write
+    x <- X[,p]
+    reg <- glm(Y~x+U, family=binomial)    # perform logistic regression
+    s.reg <- summary(reg)                 # get the summary for the regression
+    c.reg <- s.reg$coef["x",]             # select the coefficients for the exposure
+    write.table(t(c(snp.Names[p], c.reg)), file="GenomeUnivariateResults.txt", append=ifelse(p==1, F, T), quote=F, sep="\t", col.names=ifelse(p==1, T, F), row.names=F)
+    return(c.reg)                         # to avoid potential memory issues only return coefficients if small number of exposures
+  }, simplify=T))
+  univariate.results <- data.frame(snp.Names,univariate.results)
+  names(univariate.results) <- c("SNP.Name","Estimate", "SD","Z.statistic", "P.value")
+  univariate.results$P.value <- format(univariate.results$P.value, scientific=T)
+}
+
+```
+
+### Univariate results: {.tabset}
+#### Univariate Summary Table:
+```{r Genome: Univariate table}
+if(univariate) { kable(univariate.results[as.numeric(univariate.results$P.value)<0.05,], digits=3, align="c", row.names=FALSE, col.names=c("SNP","Estimate", "SD","Z Statistics", "P-value"))}
+```
+
+#### Univariate Manhattan Plot:
+```{r Genome: Univariate MH plot}
+neglog.pvalues <- -log10(as.numeric(univariate.results$P.value))
+plot(1:nrow(univariate.results), neglog.pvalues, 
+     pch=16, xaxt="n", ylim=c(0, max(neglog.pvalues, 3)),
+     ylab="-log(p-value)", xlab="SNPs")
+abline(h=-log10(0.05/nrow(univariate.results)), lty=2, lwd=2, col=2)
+```
+
+#### Univariate QQ-Plot:
+```{r Genome: QQ-plot}
+pvalues <- as.numeric(univariate.results$P.value)
+r <- gcontrol2(pvalues, pch=16)
+lambda <- round(r$lambda,3)
+text(x=1, y=5, labels=bquote(lambda == .(lambda)), cex=2)
+
+```
+
+<br>
+

@@ -1,0 +1,340 @@
+---
+title: 'SHARP Multiomics Workshop: Exposome Analysis'
+subtitle: "Pre-Workshop Lab"
+author: "David Conti"
+date: "`r format(Sys.time(), '%d %B %Y')`"
+
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+---
+
+```{css, echo=FALSE}
+pre {
+  max-height: 200px;
+  overflow-: auto;
+}
+
+```
+
+```{r exposome setup, include=FALSE, echo=FALSE}
+library(knitr)
+library(reshape2)
+library(ggplot2)
+library(epiR)
+library(summarytools) # for summarizing variables
+library(tidyverse)
+library(glmnet)
+library(Biobase)
+library(gap)
+library(factoextra)
+library(gplots)
+library(MultiAssayExperiment)
+library(UpSetR)
+library(pls)
+library(corrplot)
+library(RColorBrewer)
+library(BAS)
+library(here)
+
+options(knitr.table.format = "html")
+knitr::opts_chunk$set(echo = TRUE)
+
+# folder for analysis
+work.dir <- here::here()
+setwd(work.dir)
+
+# suppress warning messages for final rendering
+old.warn <- getOption("warn")
+options(warn=-1)
+
+```
+
+```{r Exposome: Data Analysis setup, echo=TRUE }
+codebook <- read.table(paste0(work.dir, "/Data/codebook.txt"), sep="\t", header=T)
+
+# Outcome
+outcome.Name <- "hs_bmi_c_cat" # "hs_asthma" # "hs_bmi_c_cat" "hs_zbmi_who" "e3_bw" 
+
+# Covariates
+covariate.Names <- c("h_mbmi_None","e3_sex_None","h_age_None","h_cohort","h_edumc_None")
+
+# Exposure related
+exposure.group <- "Organochlorines" # {"Metals", "Organochlorines", "Organophosphate pesticides", "PBDE", "PFAS", "Phenols", "Phthalates", "All"}
+
+if(exposure.group=="All") { exposure.Names <- as.character(codebook$variable_name[codebook$domain=="Chemicals"]) }
+if(exposure.group!="All") { exposure.Names <- as.character(codebook$variable_name[codebook$family==exposure.group]) }
+exposure.Names <- exposure.Names[grep("madj", exposure.Names)] # select only mother measures of exposure
+
+# Analysis models to run
+univariate <- T
+ridge <- T
+lasso <- T
+elasticnet <- T
+bayesian.selection <- T
+
+```
+
+## Exposome: Overview
+The idea of the exposome was first discussed by Chris Wild in 2005 (1) with the idea of using omic technologies to capture environmental factors influencing human health and disease. The idea is that if factors in the environment do impact our heath there should be molecular signatures that reflect this and that these signatures, in combination with understanding of environmental drivers (e.g. changes is air pollution), can be used to measure both the external reflection of those exposure within the individual and the internal consequence of those exposures. Rappaport and Smith (2) nicely described this motivation, as if “...toxic effects are mediated through chemicals that alter critical molecules, cells, and physiological processes inside the body..., exposures are not restricted to chemicals (toxicants) entering the body from air, water, or food, for example, but also include chemicals produced by inflammation, oxidative stress, lipid peroxidation, infections, gut flora, and other natural processes”. Such chemicals can be measured with modern "metabolomic" techniques and include both targeted and untargeted approaches. The challenge for the resulting analysis is often how to identify the independent associations of each measured and often correlated exposure feature to an outcome of interest, especially in high dimensions.
+
+This lab section provides examples of descriptive statistics to explore the data and implementation of ridge, lasso, elastic net and Bayesian selection. As the exposure features measured often are assumed to indicate long-term effects of the environment preceding the outcome and other omic measures, the analysis is often extended to a mediation type framework.
+
+Figure from (3).
+```{r image-exposome-general, echo=FALSE, message=FALSE, fig.align='center', fig.cap='', out.width='100%', out.height='100%'}
+knitr::include_graphics(paste0(work.dir, "/ExposomeGeneral.jpg"))
+```
+
+References:
+
+1. Wild, C.P. (2005). Complementing the genome with an "exposome": the outstanding challenge of environmental exposure measurement in molecular epidemiology. Cancer Epidemiol Biomarkers Prev 14, 1847-1850.
+
+2. Rappaport, S.M., and Smith, M.T. (2010). Epidemiology. Environment and disease risks. Science 330, 460-461.
+
+3. Vermeulen, R., Schymanski, E.L., Barabasi, A.L., and Miller, G.W. (2020). The exposome and health: Where chemistry meets biology. Science 367, 392-396.
+
+### The Question of interest:
+- How are measured exposures for **`r exposure.group`** associated with the outcome **`r outcome.Name`**?
+  <br>
+
+### Exposure mixture analysis
+Often in assessing multiple exposures we have several questions or goals interest:  
+1) what is the independent effect of each exposure?
+2) do combinations of exposures act in a synergistic manner to increase risk? and,
+3) what is the combined effect when an individual is exposed to a mixture of compounds?
+
+The first goal is often explored via multivariable regression and we provide some example of this analysis below. The second goal can be explored with interaction analyses (covered within this workshop). The third goal often relies on mixture approaches. These approaches are not the focus of this particular workhop, but the SHARP training program does offer a workshop in this area. See https://www.publichealth.columbia.edu/research/precision-prevention/environmental-mixtures-workshop-applications-environmental-health-studies
+
+
+## Exposome: Processing the Data
+```{r Exposome: Processing the Data, echo=TRUE}
+load(paste0(work.dir, "/Data/HELIX.MultiAssayExperiment.RData"))
+
+variables <- c(covariate.Names, exposure.Names)
+d <- wideFormat(intersectColumns(helix_ma[variables, ,]), colDataCols=outcome.Name) # 1) select variables but keep in MultiAssayExperiment format; 2) intersectionColumns selects only individuals with complete data; 3) wideFormat returns as a DataFrame
+
+
+# Create exposure design matrix
+X <- as.data.frame(apply(d[,paste("exposome",exposure.Names,sep="_")],2,as.numeric))
+names(X) <- exposure.Names
+X <- scale(X, center=T, scale=T)
+
+# Create the outcome variable
+Y <- d[,outcome.Name] # outcome
+if(outcome.Name=="hs_bmi_c_cat") { Y <- ifelse(as.numeric(Y)>=3, 1, 0)}
+if(outcome.Name=="e3_bw") { Y <- ifelse(as.numeric(Y)<2500, 1, 0)}
+
+# Create the covariate design matrix
+U <- as.data.frame(d[,paste("covariates",covariate.Names,sep="_")])
+names(U) <- covariate.Names
+U[,c("h_cohort","e3_sex_None","h_edumc_None")] <- lapply(U[,c("h_cohort","e3_sex_None","h_edumc_None")], factor)
+U[,c("h_mbmi_None", "h_age_None")] <- lapply(U[,c("h_mbmi_None", "h_age_None")], as.numeric)
+U <- model.matrix(as.formula(paste("~-1+", paste(covariate.Names, collapse="+"))), data=U)
+
+# Other variables for analysis
+N <- nrow(d) # number of individuals in the analysis
+Q <- ncol(U)  # number of covariates in the matrix U
+P <- ncol(X)  # number of exposures in the matrix X
+
+```
+<br>
+
+## Exposome: Descriptive Statistics for `r exposure.group`: {.tabset}
+- Exposures include a total of `r P` exposures and include the following exposures:  
+`r exposure.Names` 
+
+### Summary Table for Each Exposure
+```{r Exposome: summmary statistics, echo=TRUE, out.height='200px'}
+summarytools::view(dfSummary(as.data.frame(X), style = 'grid',
+                               max.distinct.values = 10, plain.ascii =   FALSE, valid.col = FALSE, headings = FALSE), method = "render")
+
+```
+
+### Correlation Matrix for the Exposures:
+```{r Exposome: cor.plot, echo=TRUE}
+cormat <- cor(X, use="complete.obs")
+corrplot(cormat, type="upper", order="hclust",
+         col=brewer.pal(n=8, name="RdYlBu"),
+         title = "",
+         addCoef.col = "black",
+         tl.cex=.5, number.cex=.5)
+
+```
+<br>
+
+### Hierarchical clustering on Exposures:
+```{r Exposome: hierarchical clustering, echo=TRUE }
+#  hierarchical clustering
+hc <- t(X) %>%
+  dist(method = "euclidean") %>% # Compute dissimilarity matrix based on Euclidean space
+  hclust(method = "ward.D2")     # Use complete linkage
+
+# Visualize using factoextra
+# Cut in groups and color by groups
+fviz_dend(hc, k = 3, # Cut in groups
+          show_labels = TRUE, cex=0.4,
+          color_labels_by_k = TRUE, # color labels by groups
+          rect = TRUE # Add rectangle around groups
+          )
+
+```
+
+## Exposome: Univariate Regression
+```{r Exposome: Univariate model, echo=TRUE}
+if(univariate) {
+  univariate.results <- t(sapply(1:P, FUN=function(p) {  # using index p facilitate write
+    x <- X[,p]
+    reg <- glm(Y~x+U, family=binomial)    # perform logistic regression
+    s.reg <- summary(reg)                 # get the summary for the regression
+    c.reg <- s.reg$coef["x",]             # select the coefficients for the exposure
+    write.table(t(c(exposure.Names[p], c.reg)), file="ExposomeUnivariateResults.txt", append=ifelse(p==1, F, T), quote=F, sep="\t", col.names=ifelse(p==1, T, F), row.names=F)
+    return(c.reg)                         # to avoid potential memory issues only return coefficients if small number of exposures
+  }, simplify=T))
+  univariate.results <- data.frame(exposure.Names,univariate.results)
+}
+
+```
+
+### Univariate results: {.tabset}
+#### Univariate Summary Table:
+```{r Exposome: Univariate table}
+if(univariate) { kable(univariate.results, digits=3, align="c", row.names=FALSE, col.names=c("Exposure","Estimate", "SD","Z statistic", "P-value"))}
+```
+
+#### Univariate Manhattan Plot:
+```{r Exposome: Univariate plot}
+neglog.pvalues <- -log10(univariate.results$Pr...z..)
+plot(1:nrow(univariate.results), neglog.pvalues, 
+     pch=16, xaxt="n", ylim=c(0, max(neglog.pvalues, 3)),
+     ylab="-log(p-value)", xlab="")
+text(x=1:nrow(univariate.results), y=par("usr")[3]-0.1, xpd=NA,
+     labels=univariate.results$exposure.Names, adj=.9, srt=45, cex=.75)
+abline(h=-log10(0.05/nrow(univariate.results)), lty=2, lwd=2, col=2)
+```
+<br>
+
+## Exposome: Ridge regression
+```{r Exposome: Ridge Regression, echo=TRUE}
+if(ridge) {
+  ridge.cv <- cv.glmnet(x=X, y=Y, family="binomial", alpha=0)  # alpha=0 is for ridge
+  ridge.coef <- coef(ridge.cv, s = "lambda.min")
+  ridge.fit <- glmnet(x=X, y=Y, family="binomial", alpha=0)
+}
+```
+
+### Ridge Results: {.tabset}
+#### Ridge Selection of $\lambda$ via Cross Validation
+```{r Exposome: Ridge Cross Validation}
+if(ridge) { plot(ridge.cv) }
+```
+
+#### Ridge Coefficient Shrinkage
+```{r Exposome: Ridge Shrinkage}
+if(ridge) { 
+  plot(ridge.fit, xvar="lambda", label=T)
+  abline(v=log(ridge.cv$lambda.min), lty=2, col="red")
+  abline(v=log(ridge.cv$lambda.1se), lty=2, col="green")
+}
+```
+
+#### Ridge Coefficients for the Selected Model
+```{r Exposome: Ridge coefficients}
+if(ridge) { ridge.coef }
+```
+
+<br>
+
+
+## Exposome: LASSO regression
+```{r Exposome: LASSO Regression, echo=TRUE}
+if(lasso) {
+  lasso.cv <- cv.glmnet(x=X, y=Y, family="binomial", alpha=1)  # alpha=1 is for lasso
+  lasso.coef <- coef(lasso.cv, s = "lambda.min")
+  lasso.fit <- glmnet(x=X, y=Y, family="binomial", alpha=1)
+}
+```
+
+### LASSO Results: {.tabset}
+#### LASSO Selection of $\lambda$ via Cross Validation
+```{r Exposome: LASSO Cross Validation}
+if(lasso) { plot(lasso.cv) }
+```
+
+#### LASSO Coefficient Shrinkage
+```{r Exposome: LASSO Shrinkage}
+if(lasso) { 
+  plot(lasso.fit, xvar="lambda", label=T)
+  abline(v=log(lasso.cv$lambda.min), lty=2, col="red")
+  abline(v=log(lasso.cv$lambda.1se), lty=2, col="green")
+}
+```
+
+#### LASSO Coefficients for the Selected Model
+```{r Exposome: LASSO coefficients}
+if(lasso) { lasso.coef }
+```
+<br>
+
+## Exposome: Elastic net regression
+```{r Exposome: Elastic net Regression, echo=TRUE}
+if(elasticnet) {
+  elasticnet.cv <- cv.glmnet(x=X, y=Y, family="binomial", alpha=0.5)  # alpha=0.5 is for elastic net
+  elasticnet.coef <- coef(elasticnet.cv, s = "lambda.min")
+  elasticnet.fit <- glmnet(x=X, y=Y, family="binomial", alpha=0.5)
+}
+```
+
+### Elastic net Results: {.tabset}
+#### Elastic net Selection of $\lambda$ via Cross Validation
+```{r Exposome: Elastic net Cross Validation}
+if(elasticnet) { plot(elasticnet.cv) }
+```
+
+#### Elastic net Coefficient Shrinkage
+```{r Exposome: Elastic net Shrinkage}
+if(elasticnet) { 
+  plot(elasticnet.fit, xvar="lambda", label=T)
+  abline(v=log(elasticnet.cv$lambda.min), lty=2, col="red")
+  abline(v=log(elasticnet.cv$lambda.1se), lty=2, col="green")
+}
+```
+
+#### Elastic net Coefficients for the Selected Model
+```{r Exposome: Elastic net coefficients}
+if(elasticnet) { elasticnet.coef }
+```
+<br>
+
+
+## Exposome: Bayesian stochastic feature selection
+```{r Exposome: bayesian selection, echo=TRUE}
+if(bayesian.selection) { 
+  U <- U[,2:ncol(U)]
+  reg.bas <- bas.glm(Y~X+U, family = binomial(link = "logit"),
+                   betaprior = bic.prior(), modelprior=beta.binomial(1,P),
+                   include.always = ~U)
+  coef.bas <- coef(reg.bas, estimator="BMA")
+  coef.r <- data.frame(c("Intercept", exposure.Names, names(as.data.frame(U))), coef.bas$postmean, coef.bas$postsd,coef.bas$probne0)
+  names(coef.r) <- c("Variable", "Estimate", "Standard Deviation", "Pr(B!=0")
+}
+```
+
+### Bayesian stochastic feature selection Results: {.tabset}
+#### Posterior Probability of Inclusion
+```{r Exposome: bayesian selection plot posterior inclusion probabilities}
+if(bayesian.selection) { 
+  plot(reg.bas, which=c(4))
+}
+```
+
+#### Marginal Posterior Estimates
+```{r Exposome: bayesian selection marginal posterior estimates}
+if(bayesian.selection) { 
+  kable(coef.r, digits=3, align="c", row.names=FALSE)
+}
+```
+
+
